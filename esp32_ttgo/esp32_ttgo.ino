@@ -1,21 +1,74 @@
-#include <WiFi.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include "cert.h"
 
-const char * ssid = "home_wifi";
-const char * password = "helloworld";
 
+
+#define GSM_PIN "0814717" //replace with sim pin
+
+const char apn[]      = "web.gprs.mtnnigeria.net";
+const char gprsUser[] = "";
+const char gprsPass[] = "";
+
+// TTGO T-Call pins
+#define MODEM_RST            5
+#define MODEM_PWKEY          4
+#define MODEM_POWER_ON       23
+#define MODEM_TX             27
+#define MODEM_RX             26
+
+// Set serial for debug console (to Serial Monitor, default speed 115200)
+#define SerialMon Serial
+// Set serial for AT commands (to SIM800 module)
+#define SerialAT Serial1
+
+// Configure TinyGSM library
+#define TINY_GSM_MODEM_SIM800      // Modem is SIM800
+#define TINY_GSM_RX_BUFFER   1024  // Set RX buffer to 1Kb
+
+#include <TinyGsmClient.h>
+
+#define device_id "device/emission/08143732285"
+
+#ifdef DUMP_AT_COMMANDS
+  #include <StreamDebugger.h>
+  StreamDebugger debugger(SerialAT, SerialMon);
+  TinyGsm modem(debugger);
+#else
+  TinyGsm modem(SerialAT);
+#endif
+
+// TinyGSM Client for Internet connection
+TinyGsmClient Client(modem);
+
+#define uS_TO_S_FACTOR 1000000     /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP  36          /* Time ESP32 will go to sleep (in seconds) 3600 seconds = 1 hour */
+
+#define IP5306_ADDR          0x75
+#define IP5306_REG_SYS_CTL0  0x00
+
+//unlock device and connect
+void connect() {
+
+  SerialMon.println("Initializing modem...");
+  modem.restart();  
+  SerialMon.print("Connecting to APN: ");
+  SerialMon.println(apn);
+  if (GSM_PIN && modem.getSimStatus() != 3 ) {
+        modem.simUnlock(GSM_PIN);
+    }
+  SerialMon.println(modem.getSimStatus());
+  delay(500);
+}
 
 String FirmwareVer = {
-  "2.2"
+  "0.1.0"
 };
 #define URL_fw_Version "https://github.com/nsisong/esp_update/blob/master/esp32_ota/bin_version.txt"
 #define URL_fw_Bin "https://github.com/nsisong/esp_update/blob/master/esp32_ota/test.bin"
 
 
-void connect_wifi();
 void firmwareUpdate();
 int FirmwareVersionCheck();
 
@@ -23,6 +76,7 @@ unsigned long previousMillis = 0; // will store last time LED was updated
 unsigned long previousMillis_2 = 0;
 const long interval = 60000;
 const long mini_interval = 1000;
+
 void repeatedCall() {
   static int num=0;
   unsigned long currentMillis = millis();
@@ -39,77 +93,73 @@ void repeatedCall() {
     Serial.print(num++);
     Serial.print(" Active fw version:");
     Serial.println(FirmwareVer);
-   if(WiFi.status() == WL_CONNECTED) 
-   {
-       Serial.println("wifi connected");
-   }
-   else
-   {
-    connect_wifi();
-   }
   }
+   
 }
 
-struct Button {
-  const uint8_t PIN;
-  uint32_t numberKeyPresses;
-  bool pressed;
-};
 
-Button button_boot = {
-  0,
-  0,
-  false
-};
-/*void IRAM_ATTR isr(void* arg) {
-    Button* s = static_cast<Button*>(arg);
-    s->numberKeyPresses += 1;
-    s->pressed = true;
-}*/
-
-void IRAM_ATTR isr() {
-  button_boot.numberKeyPresses += 1;
-  button_boot.pressed = true;
-}
 
 
 void setup() {
-  pinMode(button_boot.PIN, INPUT);
-  attachInterrupt(button_boot.PIN, isr, RISING);
+
   Serial.begin(115200);
+
+  // Set serial monitor debugging window baud rate to 115200
+  SerialMon.begin(115200);
+
+  // Set modem reset, enable, power pins
+  pinMode(MODEM_PWKEY, OUTPUT);
+  pinMode(MODEM_RST, OUTPUT);
+  pinMode(MODEM_POWER_ON, OUTPUT);
+  digitalWrite(MODEM_PWKEY, LOW);
+  digitalWrite(MODEM_RST, HIGH);
+  digitalWrite(MODEM_POWER_ON, HIGH);
+
+
+
+  // Set GSM module baud rate and UART pins
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  delay(2000);
+
+  // Restart SIM800 module, it takes quite some time
+  // To skip it, call init() instead of restart()
+  
+  connect();
+  
+  while (!modem.gprsConnect(apn, gprsUser, gprsPass)) {
+    connect();
+    SerialMon.println("fail to Connect to GPRS");
+  }
+
+  if (modem.isGprsConnected()){
+    SerialMon.print("Local IP: ");
+    SerialMon.println(modem.localIP());
+
+  }
+  // Configure the wake up source as timer wake up  
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+
+
+
   Serial.print("Active firmware version:");
   Serial.println(FirmwareVer);
-  pinMode(LED_BUILTIN, OUTPUT);
-  connect_wifi();
+  // pinMode(LED_BUILTIN, OUTPUT);
+
 }
 void loop() {
-  if (button_boot.pressed) { //to connect wifi via Android esp touch app 
-    Serial.println("Firmware update Starting..");
-    firmwareUpdate();
-    button_boot.pressed = false;
-  }
+ 
+    // Serial.println("Firmware update Starting..");
+    // firmwareUpdate();
+
   repeatedCall();
 }
 
-void connect_wifi() {
-  Serial.println("Waiting for WiFi");
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
 
 
 void firmwareUpdate(void) {
   WiFiClientSecure client;
   client.setCACert(rootCACertificate);
-  httpUpdate.setLedPin(LED_BUILTIN, LOW);
+  // httpUpdate.setLedPin(LED_BUILTIN, LOW);
   t_httpUpdate_return ret = httpUpdate.update(client, URL_fw_Bin);
 
   switch (ret) {
